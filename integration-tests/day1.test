@@ -1,0 +1,4 @@
+./zig-out/bin/db-tutorial
+<<<
+.exit
+>>>= 0
