@@ -49,6 +49,9 @@ const Table = struct {
     // Allocate new memory
     fn row_slot(table: *Table, row_num: u32) ![]u8 {
         var page_num: u32 = row_num / rows_per_page;
+
+        std.debug.print("page num: {d}\n", .{page_num});
+        std.debug.print("row num: {d}\n", .{row_num});
         var page = table.pages[page_num];
         // page is a "nullable" type
         if (page == null) {
@@ -56,13 +59,16 @@ const Table = struct {
             table.pages[page_num] = mem;
             // not sure if I have to do this b/c they should point to the same chunk of memory..?
             page = table.pages[page_num];
+            std.debug.print("alloc\n", .{});
         }
 
+        std.debug.print("page len: {d}\n", .{page.?.len});
         var row_offset: u32 = row_num % rows_per_page;
-        var byte_offset: u32 = row_offset % row_size;
-        var page1 = page.?;
-
-        return page1[byte_offset..row_size];
+        var byte_offset: u32 = row_offset * row_size;
+        var page1 = page.?[byte_offset..(byte_offset + row_size)];
+        std.debug.print("byte_offset is: {d}\n", .{byte_offset});
+        std.debug.print("slot len: {d}\n", .{page1.len});
+        return page1;
     }
     fn write_row(table: *Table, row_num: u32, row: Row) !void {
         var slot = try table.row_slot(row_num);
