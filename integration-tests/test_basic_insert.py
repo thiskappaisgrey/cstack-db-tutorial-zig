@@ -3,7 +3,7 @@ import lib
 def test_insert():
     outs = lib.db(["insert 1 user1 person@example.com", "select", ".exit"])
     
-    assert outs == ['sqlite>Writing row: Row - 1, user1, person@example.com',  "sqlite>Read row: Row - 1, user1, person@example.com",  "sqlite>"] 
+    assert outs == ['sqlite>Executed.',  "sqlite>(1, user1, person@example.com)",  "sqlite>"] 
 
 
 def test_table_full():
@@ -20,7 +20,7 @@ def test_long_strings():
             ".exit"
             ]
     outs = lib.db(script)
-    assert  [f'sqlite>Writing row: Row - 1, {long_username}, {long_email}',  f"sqlite>Read row: Row - 1, {long_username}, {long_email}",  "sqlite>"] == outs
+    assert  [f'sqlite>Executed.',  f"sqlite>(1, {long_username}, {long_email})",  "sqlite>"] == outs
 
 def test_too_long_strings():
     long_username = "a"*33
