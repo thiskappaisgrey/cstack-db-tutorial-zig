@@ -1,5 +1,16 @@
 import lib
-# lib.db
+import pytest
+import os
+
+# Remove the dbfile before and after each test..
+@pytest.fixture(autouse=True)
+def run_before_and_after():
+    try:
+        os.remove("dbfile.db") 
+    except:
+        pass
+    yield
+    os.remove("dbfile.db") 
 def test_insert():
     outs = lib.db(["insert 1 user1 person@example.com", "select", ".exit"])
     

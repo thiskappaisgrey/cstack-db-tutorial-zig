@@ -1,7 +1,6 @@
 import subprocess
 
 def db(commands: list[str]) -> list[str]:
-    # p = subprocess.Popen()
     p = subprocess.Popen(["./zig-out/bin/db-tutorial"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
     try:
         # commands.
@@ -11,5 +10,5 @@ def db(commands: list[str]) -> list[str]:
     except subprocess.TimeoutExpired:
         p.kill()
         return []
-
+# TODO: define a clean up function with pytest..
      

@@ -1,4 +1,5 @@
 const std = @import("std");
+// const util = @import("util.zig");
 
 // Allocator..?
 const Allocator = std.mem.Allocator;
@@ -6,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const MetaCommandError = error{MetaCommandUnrecognizedCommand};
 const PrepareError = error{ PrepareUnRecognizedStatement, PrepareMissingArgs, PrepareParseIntErr, PrepareStringTooLong };
 const ExecuteError = error{TableFull};
+const PageError = error{ OutOfBounds, PageUnitialized };
 const username_size = 32 + 1;
 const email_size = 255 + 1;
 
@@ -15,10 +17,6 @@ const Row = struct {
     email: [email_size]u8,
 };
 const StatementTypes = union(enum) { Insert: Row, Select };
-// Tagged Union
-//n
-// TODO: Represent a row - get the size by using comptime..
-// Figure out how to get the size of a variable at comptime
 const row_size = @sizeOf(Row);
 // 4 Kilobytes pages
 const page_size: u32 = 4096;
@@ -34,42 +32,60 @@ const page_allocator = std.heap.page_allocator;
 /// The table holds pointers that we get from the os
 const Table = struct {
     num_rows: u32,
-    pages: [table_max_pages]?Page,
+    pager: Pager,
     allocator: Allocator,
     /// Create a table and initialize the memory with null on the heap
-    fn new_table(alloc: Allocator) Allocator.Error!*Table {
+    fn init(alloc: Allocator, fd: std.fs.File) !*Table {
         var table: *Table = try alloc.create(Table);
-        table.num_rows = 0;
         table.allocator = alloc;
-        table.pages = [_]?Page{null} ** table_max_pages;
+        table.pager = Pager.init(fd, alloc);
+        var file_size: u32 = @intCast(try fd.getEndPos());
+        std.debug.print("File size is: {d}\n", .{file_size});
+        table.num_rows = file_size / row_size;
         return table;
     }
-    fn destroy(table: *Table) void {
-        table.allocator.destroy(table);
-    }
-    // Allocate new memory
-    fn row_slot(table: *Table, row_num: u32) ![]u8 {
-        var page_num: u32 = row_num / rows_per_page;
-
-        std.debug.print("page num: {d}\n", .{page_num});
-        std.debug.print("row num: {d}\n", .{row_num});
-        var page = table.pages[page_num];
-        // page is a "nullable" type
-        if (page == null) {
-            var mem = try page_allocator.alloc(u8, page_size);
-            table.pages[page_num] = mem;
-            // not sure if I have to do this b/c they should point to the same chunk of memory..?
-            page = table.pages[page_num];
-            std.debug.print("alloc\n", .{});
+    /// Destroy also needs to dellocate all of the memory in the pages as well..
+    fn deinit(self: *Table) void {
+        var full_pages = self.num_rows / rows_per_page;
+        // TODO: this really should be part of the pager's deinit..
+        // TODO: Also - I don't really have to free memory as long as I use the Arena allocator haha.
+        for (0..full_pages) |i| {
+            if (self.pager.pages[i]) |p| {
+                self.pager.flush(i, page_size) catch {
+                    std.debug.print("Couldn't flush page..", .{});
+                };
+                self.allocator.free(p);
+                self.pager.pages[i] = null;
+            }
+        }
+        var add_rows = self.num_rows % rows_per_page;
+        std.debug.print("Additional rows: {d}", .{add_rows});
+        if (add_rows > 0) {
+            var page_num = full_pages;
+            if (self.pager.pages[page_num]) |p| {
+                // TODO: on a partial page.. the entire page is flushed which is bad..
+                self.pager.flush(page_num, add_rows * row_size) catch {
+                    std.debug.print("Couldn't flush page..", .{});
+                };
+                self.allocator.free(p);
+                self.pager.pages[page_num] = null;
+            }
         }
 
-        std.debug.print("page len: {d}\n", .{page.?.len});
+        self.pager.fd.close();
+        self.allocator.destroy(self);
+    }
+    // Allocate new memory
+    fn row_slot(self: *Table, row_num: u32) ![]u8 {
+        var page_num: u32 = row_num / rows_per_page;
+        var page = try self.pager.get_page(page_num);
+
         var row_offset: u32 = row_num % rows_per_page;
         var byte_offset: u32 = row_offset * row_size;
-        var page1 = page.?[byte_offset..(byte_offset + row_size)];
+        var row = page[byte_offset..(byte_offset + row_size)];
         std.debug.print("byte_offset is: {d}\n", .{byte_offset});
-        std.debug.print("slot len: {d}\n", .{page1.len});
-        return page1;
+        std.debug.print("slot len: {d}\n", .{row.len});
+        return row;
     }
     fn write_row(table: *Table, row_num: u32, row: Row) !void {
         var slot = try table.row_slot(row_num);
@@ -77,8 +93,15 @@ const Table = struct {
         @memcpy(slot, row_bytes);
     }
     fn read_row(table: *Table, row_num: u32) !*align(1) Row {
+        std.debug.print("Reading row: {d}\n", .{row_num});
         var slot = try table.row_slot(row_num);
         var s: *[row_size]u8 = @as(*[row_size]u8, @ptrCast(slot.ptr));
+        var zero = [_]u8{0} ** page_size;
+        // TODO: need to figure out how to deal with reading an invalid page..
+        //
+        if (std.mem.eql(u8, s, &zero)) {
+            return PageError.PageUnitialized;
+        }
         // var row_bytes: [292]u8 = slot[row_num..row_size];
         var my_row_ptr = std.mem.bytesAsValue(Row, s);
         // @compileLog(@TypeOf(my_row_ptr));
@@ -86,13 +109,66 @@ const Table = struct {
     }
 };
 
+const Pager = struct {
+    fd: std.fs.File,
+    pages: [table_max_pages]?Page,
+    allocator: Allocator,
+    /// Create a pager with pages initialzed to the null pointer
+    fn init(fd: std.fs.File, allocator: Allocator) Pager {
+        var pages = [_]?Page{null} ** table_max_pages;
+        return Pager{ .fd = fd, .pages = pages, .allocator = allocator };
+    }
+
+    fn get_page(self: *Pager, page_num: u32) ![]u8 {
+        if (page_num > table_max_pages) {
+            return PageError.OutOfBounds;
+        }
+        var page: []u8 = undefined;
+        if (self.pages[page_num]) |p| {
+            std.debug.print("Cache hit, reading {d} from cache", .{page_num});
+            return p;
+        }
+        // cache miss - allocate memory and load from file
+        std.debug.print("Cache miss, reading {d} from file", .{page_num});
+        page = try self.allocator.alloc(u8, page_size);
+        @memset(page, 0);
+        // 0 out the memory
+        // TODO: I think getEndPos should give me the file size, but I can stat the file as well?
+        var filelen = try self.fd.getEndPos();
+        var num_pages: u64 = filelen / page_size;
+        // partial page at the end of a file
+        if (filelen % page_size != 0) {
+            num_pages += 1;
+        }
+
+        if (page_num <= num_pages) {
+            // seek the file to the start of the page
+            try self.fd.seekTo(page_num * page_size);
+            var size_read = try self.fd.read(page);
+            if (size_read < page_size) {
+                std.debug.print("Read partial page: {d}", .{size_read});
+            }
+        }
+        self.pages[page_num] = page;
+        return page;
+    }
+    // Instead of flushing the entire page, I also need to be able to
+    // flush part of a page..
+    fn flush(self: Pager, page_num: usize, offset: u32) !void {
+        std.debug.print("Flushing db", .{});
+        if (self.pages[page_num]) |p| {
+            try self.fd.seekTo(page_num * page_size);
+            var s = try self.fd.write(p[0..offset]);
+            std.debug.print("Wrote {d} bytes to file", .{s});
+        }
+    }
+};
+
 // The article compacts the struct to bytes (without wasted space & getting rid of alignment)
-// but in this case - you only save 1 byte per "page", so idk if it's worth serializing the row..?
-// maybe for learning purposes..?
-//
-//
-fn do_meta_command(c: []const u8) MetaCommandError!void {
+// but I'm too lazy to do that
+fn do_meta_command(c: []const u8, table: *Table) MetaCommandError!void {
     if (std.mem.eql(u8, c, ".exit")) {
+        table.deinit();
         std.os.exit(0);
     } else {
         return MetaCommandError.MetaCommandUnrecognizedCommand;
@@ -117,7 +193,7 @@ fn prepare_statement(c: []const u8) !StatementTypes {
                 return PrepareError.PrepareParseIntErr;
             }
         }
-        var username: [username_size]u8 = undefined;
+        var username: [username_size]u8 = [_]u8{0} ** username_size;
         if (s.next()) |u| {
             // username = me;
             if (u.len > (username_size - 1)) {
@@ -129,7 +205,7 @@ fn prepare_statement(c: []const u8) !StatementTypes {
         } else {
             return PrepareError.PrepareMissingArgs;
         }
-        var email: [email_size]u8 = undefined;
+        var email: [email_size]u8 = [_]u8{0} ** email_size;
 
         if (s.next()) |u| {
             // username = me;
@@ -186,6 +262,7 @@ fn print_row(r: anytype, logger: anytype) !void {
     try logger.print("({d}, {s}, {s})\n", .{ r.id, username, email });
 }
 fn execute_select(table: *Table, logger: anytype) !void {
+    std.debug.print("Table num rows is: {d}", .{table.num_rows});
     for (0..table.num_rows) |i| {
         var row = try table.read_row(@intCast(i));
         try print_row(row, logger);
@@ -205,8 +282,14 @@ pub fn main() !void {
     const in = std.io.getStdIn().reader();
     var buf = std.io.bufferedReader(in);
     var stdin = buf.reader();
-    var table = try Table.new_table(std.heap.page_allocator);
-    defer table.destroy();
+    var db_filename = "dbfile.db";
+    // var db_file = try util.readFileOrCreate(db_filename);
+    var db_file = try std.fs.cwd().createFile(db_filename, .{ .read = true, .truncate = false });
+
+    var table = try Table.init(std.heap.page_allocator, db_file);
+    // std.debug.print("Opening file: {s}, with length: {d}\n", .{ db_filename, db_file.getEndPos() });
+
+    defer table.deinit();
 
     // _ = try stdin.read
     while (true) {
@@ -216,7 +299,7 @@ pub fn main() !void {
         var command = try stdin.readUntilDelimiterOrEof(&command_buf, '\n');
         if (command) |c| {
             if (c[0] == '.') {
-                const e = do_meta_command(c);
+                const e = do_meta_command(c, table);
                 if (e == MetaCommandError.MetaCommandUnrecognizedCommand) {
                     try stdout.print("Unrecognized Command: {s}\n", .{c});
                 }
@@ -251,9 +334,9 @@ pub fn main() !void {
     try bw.flush(); // don't forget to flush!
 }
 
-test "simple test" {
-    var table = try Table.new_table(std.testing.allocator);
-    defer table.destroy(); // try commenting this out and see if zig detects the memory leak!
+test "Simple table test" {
+    var table = try Table.init(std.testing.allocator);
+    defer table.deinit(); // try commenting this out and see if zig detects the memory leak!
     for (table.pages) |page| {
         try std.testing.expectEqual(page, @as(?Page, null));
     }
@@ -262,7 +345,7 @@ test "simple test" {
     // var page = try table.row_slot(0);
     // @compileLog("type of page is: ", @TypeOf(page));
     // TODO: Make a row constructor that takes a string literal and copies it to the array
-    var usrname_buffer: [32]u8 = [_]u8{0} ** 32;
+    var usrname_buffer: [username_size]u8 = [_]u8{0} ** username_size;
     var email_buffer: [email_size]u8 = [_]u8{0} ** email_size;
     var username = "hello";
     usrname_buffer[0..username.len].* = username.*;
@@ -282,3 +365,5 @@ test "simple test" {
     try std.testing.expectEqual(my_row_ptr.email, my_row.email);
     // std.debug.print("Email is: {s}", .{my_row_ptr.email});
 }
+// TODO: Assert that inserting to the table doesn't leak memory..?
+// test ""
