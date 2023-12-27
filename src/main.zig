@@ -4,10 +4,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const MetaCommandError = error{MetaCommandUnrecognizedCommand};
-const PrepareError = error{ PrepareUnRecognizedStatement, InsertMissingArgs };
+const PrepareError = error{ PrepareUnRecognizedStatement, PrepareMissingArgs, PrepareParseIntErr, PrepareStringTooLong };
 const ExecuteError = error{TableFull};
-const username_size = 32;
-const email_size = 255;
+const username_size = 32 + 1;
+const email_size = 255 + 1;
+
 const Row = struct {
     id: u32,
     username: [username_size]u8,
@@ -77,7 +78,7 @@ const Table = struct {
     }
     fn read_row(table: *Table, row_num: u32) !*align(1) Row {
         var slot = try table.row_slot(row_num);
-        var s: *[292]u8 = @as(*[292]u8, @ptrCast(slot.ptr));
+        var s: *[row_size]u8 = @as(*[row_size]u8, @ptrCast(slot.ptr));
         // var row_bytes: [292]u8 = slot[row_num..row_size];
         var my_row_ptr = std.mem.bytesAsValue(Row, s);
         // @compileLog(@TypeOf(my_row_ptr));
@@ -99,36 +100,49 @@ fn do_meta_command(c: []const u8) MetaCommandError!void {
 }
 
 fn prepare_statement(c: []const u8) !StatementTypes {
+    if (c.len < 6) {
+        return PrepareError.PrepareUnRecognizedStatement;
+    }
+    // This is a segfault when a command is under..
     if (std.mem.eql(u8, c[0..6], "insert")) {
         var s = std.mem.tokenizeAny(u8, c[6..], " ");
         // _ = s;
         // if(s)
         var id: u32 = undefined;
         if (s.next()) |u| {
-            var i = try std.fmt.parseInt(u32, u, 10);
-            id = i;
-            // std.mem.copy(u8, )
+            if (std.fmt.parseInt(u32, u, 10)) |i| {
+                id = i;
+            } else |_| {
+                // _ = e;
+                return PrepareError.PrepareParseIntErr;
+            }
         }
         var username: [username_size]u8 = undefined;
         if (s.next()) |u| {
             // username = me;
+            if (u.len > (username_size - 1)) {
+                return PrepareError.PrepareStringTooLong;
+            }
             std.mem.copy(u8, &username, u);
+            // manually write the null terminator..?
+            username[u.len] = 0;
         } else {
-            return PrepareError.InsertMissingArgs;
+            return PrepareError.PrepareMissingArgs;
         }
         var email: [email_size]u8 = undefined;
 
         if (s.next()) |u| {
             // username = me;
-            std.mem.copy(u8, &email, u);
-        } else {
-            return PrepareError.InsertMissingArgs;
-        }
-        // if (email == null) {
-        //     return PrepareError.InsertMissingArgs;
-        // }
+            if (u.len > (email_size - 1)) {
+                return PrepareError.PrepareStringTooLong;
+            }
 
-        // TODO: Intialize memory!
+            std.mem.copy(u8, &email, u);
+            email[u.len] = 0;
+        } else {
+            return PrepareError.PrepareMissingArgs;
+        }
+
         return StatementTypes{ .Insert = .{ .id = id, .username = username, .email = email } };
     } else if (std.mem.eql(u8, c, "select")) {
         return StatementTypes.Select;
@@ -140,11 +154,14 @@ fn execute_statement(st: StatementTypes, logger: anytype, table: *Table) !void {
     switch (st) {
         StatementTypes.Select => {
             try execute_select(table, logger);
-            try logger.print("Statement Select Executed\n", .{});
         },
         StatementTypes.Insert => |row| {
-            try execute_insert(row, table, logger);
-            try logger.print("Statement Insert Executed\n", .{});
+            if (execute_insert(row, table, logger)) {} else |err| {
+                switch (err) {
+                    ExecuteError.TableFull => try logger.print("Could not insert into table\n", .{}),
+                    else => try logger.print("Some other error with insertion\n", .{}),
+                }
+            }
         },
         // else => unreachable,
     }
@@ -162,7 +179,11 @@ fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
     table.num_rows += 1;
 }
 fn print_row(r: anytype, logger: anytype) !void {
-    try logger.print("Row - {d}, {s}, {s}\n", .{ r.id, r.username, r.email });
+    // Need to cast into a null-terminated string first before
+    // printing b/c by defautl - this would print the entire buffer..
+    var username: [*:0]const u8 = @ptrCast(&r.username);
+    var email: [*:0]const u8 = @ptrCast(&r.email);
+    try logger.print("Row - {d}, {s}, {s}\n", .{ r.id, username, email });
 }
 fn execute_select(table: *Table, logger: anytype) !void {
     for (0..table.num_rows) |i| {
@@ -208,12 +229,19 @@ pub fn main() !void {
                 PrepareError.PrepareUnRecognizedStatement => {
                     try stdout.print("Unrecognized Prepare Statement: {s}\n", .{c});
                 },
-                PrepareError.InsertMissingArgs => {
+                PrepareError.PrepareMissingArgs => {
                     try stdout.print("Insert is missing arguments\n", .{});
                 },
-                else => {
-                    try stdout.print("Could not parse prepare statement", .{});
+                PrepareError.PrepareParseIntErr => {
+                    try stdout.print("Could not parse int argument\n", .{});
                 },
+
+                PrepareError.PrepareStringTooLong => {
+                    try stdout.print("String is too long\n", .{});
+                },
+                // else => {
+                //     try stdout.print("Could not parse prepare statement\n", .{});
+                // },
             }
         }
         try bw.flush();

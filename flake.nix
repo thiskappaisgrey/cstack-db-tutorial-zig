@@ -14,6 +14,7 @@
           zls
           just
           haskellPackages.shelltestrunner
+          (python3.withPackages (p: [ p.pytest ]))
         ];
       };
     };
