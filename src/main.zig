@@ -75,38 +75,6 @@ const Table = struct {
         self.pager.fd.close();
         self.allocator.destroy(self);
     }
-    // Allocate new memory
-    fn row_slot(self: *Table, row_num: u32) ![]u8 {
-        var page_num: u32 = row_num / rows_per_page;
-        var page = try self.pager.get_page(page_num);
-
-        var row_offset: u32 = row_num % rows_per_page;
-        var byte_offset: u32 = row_offset * row_size;
-        var row = page[byte_offset..(byte_offset + row_size)];
-        std.debug.print("byte_offset is: {d}\n", .{byte_offset});
-        std.debug.print("slot len: {d}\n", .{row.len});
-        return row;
-    }
-    fn write_row(table: *Table, row_num: u32, row: Row) !void {
-        var slot = try table.row_slot(row_num);
-        var row_bytes = std.mem.asBytes(&row);
-        @memcpy(slot, row_bytes);
-    }
-    fn read_row(table: *Table, row_num: u32) !*align(1) Row {
-        std.debug.print("Reading row: {d}\n", .{row_num});
-        var slot = try table.row_slot(row_num);
-        var s: *[row_size]u8 = @as(*[row_size]u8, @ptrCast(slot.ptr));
-        var zero = [_]u8{0} ** page_size;
-        // TODO: need to figure out how to deal with reading an invalid page..
-        //
-        if (std.mem.eql(u8, s, &zero)) {
-            return PageError.PageUnitialized;
-        }
-        // var row_bytes: [292]u8 = slot[row_num..row_size];
-        var my_row_ptr = std.mem.bytesAsValue(Row, s);
-        // @compileLog(@TypeOf(my_row_ptr));
-        return my_row_ptr;
-    }
 };
 
 const Pager = struct {
@@ -154,13 +122,58 @@ const Pager = struct {
     }
     // Instead of flushing the entire page, I also need to be able to
     // flush part of a page..
-    fn flush(self: Pager, page_num: usize, offset: u32) !void {
+    fn flush(self: *Pager, page_num: usize, offset: u32) !void {
         std.debug.print("Flushing db", .{});
         if (self.pages[page_num]) |p| {
             try self.fd.seekTo(page_num * page_size);
             var s = try self.fd.write(p[0..offset]);
             std.debug.print("Wrote {d} bytes to file", .{s});
         }
+    }
+};
+
+/// A cursor represent a location in the table
+const Cursor = struct {
+    table: *Table,
+    /// the row number in the table
+    row_num: u32,
+    /// a position one past the last element
+    /// Where we might want to insert a row
+    end_of_table: bool,
+    fn table_start(table: *Table) Cursor {
+        return Cursor{ .table = table, .row_num = 0, .end_of_table = table.num_rows == 0 };
+    }
+    fn table_end(table: *Table) Cursor {
+        return Cursor{ .table = table, .row_num = table.num_rows, .end_of_table = true };
+    }
+    fn cursor_value(self: *Cursor) ![]u8 {
+        var row_num = self.row_num;
+        var page_num: u32 = row_num / rows_per_page;
+        var page = try self.table.pager.get_page(page_num);
+
+        var row_offset: u32 = row_num % rows_per_page;
+        var byte_offset: u32 = row_offset * row_size;
+        var row = page[byte_offset..(byte_offset + row_size)];
+        std.debug.print("Reading cursor {d}\n", .{row_num});
+        return row;
+    }
+
+    fn advance(self: *Cursor) void {
+        self.row_num += 1;
+        if (self.row_num >= self.table.num_rows) {
+            self.end_of_table = true;
+        }
+    }
+    fn write(self: *Cursor, row: Row) !void {
+        var slot = try self.cursor_value();
+        var row_bytes = std.mem.asBytes(&row);
+        @memcpy(slot, row_bytes);
+    }
+    fn read(self: *Cursor) !*align(1) Row {
+        var slot = try self.cursor_value();
+        var s: *[row_size]u8 = @as(*[row_size]u8, @ptrCast(slot.ptr));
+        var my_row_ptr = std.mem.bytesAsValue(Row, s);
+        return my_row_ptr;
     }
 };
 
@@ -248,10 +261,8 @@ fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
         return ExecuteError.TableFull;
     }
     try logger.print("Executed.\n", .{});
-    // try print_row(row, logger);
-    try table.write_row(table.num_rows, row);
-    // var bytes: [*]u8 = std.mem.asBytes(&row);
-
+    var cursor: Cursor = Cursor.table_end(table);
+    try cursor.write(row);
     table.num_rows += 1;
 }
 fn print_row(r: anytype, logger: anytype) !void {
@@ -263,10 +274,14 @@ fn print_row(r: anytype, logger: anytype) !void {
 }
 fn execute_select(table: *Table, logger: anytype) !void {
     std.debug.print("Table num rows is: {d}", .{table.num_rows});
-    for (0..table.num_rows) |i| {
-        var row = try table.read_row(@intCast(i));
+    var cursor = Cursor.table_start(table);
+    while (!cursor.end_of_table) {
+        var row = try cursor.read();
         try print_row(row, logger);
+        cursor.advance();
     }
+    // for (0..table.num_rows) |i| {
+    // }
 }
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
