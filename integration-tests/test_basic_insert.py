@@ -20,7 +20,7 @@ def test_insert():
 def test_table_full():
     cs = list(map(lambda i: f"insert {i} user#{i} person#{i}@example.com", range(1, 1403))) + [".exit"]
     outs = lib.db(cs)
-    assert outs[-2] == "sqlite>Could not insert into table"
+    assert outs[-2] == "sqlite>Could not insert. Error: Table Full"
 
 def test_long_strings():
     long_username = "a"*32

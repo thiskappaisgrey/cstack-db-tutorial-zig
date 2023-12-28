@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 
 const MetaCommandError = error{MetaCommandUnrecognizedCommand};
 const PrepareError = error{ PrepareUnRecognizedStatement, PrepareMissingArgs, PrepareParseIntErr, PrepareStringTooLong };
-const ExecuteError = error{TableFull};
+const ExecuteError = error{ TableFull, DuplicateKey };
 const PageError = error{ OutOfBounds, PageUnitialized, CorruptFile };
 const username_size = 32 + 1;
 const email_size = 255 + 1;
@@ -65,6 +65,40 @@ const Table = struct {
         self.pager.fd.close();
         self.allocator.destroy(self);
     }
+    fn find(self: *Table, key: u32) !Cursor {
+        // var n = try self.pager.get_node(self.root_page_num);
+        // TODO: Add code for handling internal nodes - and change
+        // the "LeafNode" to a generic node type..
+        return self.leaf_node_find(self.root_page_num, key);
+    }
+    /// This function will return
+    /// The position of the key
+    /// The position of another key that has to be moved
+    /// The position one past the last key
+    fn leaf_node_find(self: *Table, page_num: u32, key: u32) !Cursor {
+        // _ = key;
+        var n = try self.pager.get_node(page_num);
+        var min: u32 = 0;
+        var one_past_max = n.common.num_cells;
+        var cursor: Cursor = Cursor{ .table = self, .page_num = page_num, .cell_num = undefined, .end_of_table = false };
+        while (one_past_max != min) {
+            var i = (min + one_past_max) / 2;
+            var key_i: u32 = n.cells[i].key;
+            if (key == key_i) {
+                // cell_num = i;
+                cursor.cell_num = i;
+                return cursor;
+            }
+            if (key < key_i) {
+                one_past_max = i;
+            } else {
+                min = i + 1;
+            }
+        }
+
+        cursor.cell_num = min;
+        return cursor;
+    }
 };
 
 const Pager = struct {
@@ -86,11 +120,11 @@ const Pager = struct {
         }
         var page: []u8 = undefined;
         if (self.pages[page_num]) |p| {
-            std.debug.print("Cache hit, reading {d} from cache", .{page_num});
+            std.debug.print("Cache hit, reading {d} from cache\n", .{page_num});
             return p;
         }
         // cache miss - allocate memory and load from file
-        std.debug.print("Cache miss, reading {d} from file", .{page_num});
+        std.debug.print("Cache miss, reading {d} from file\n", .{page_num});
         page = try self.allocator.alloc(u8, page_size);
         @memset(page, 0);
         // 0 out the memory
@@ -117,9 +151,9 @@ const Pager = struct {
         self.pages[page_num] = page;
         return page;
     }
-    fn unsafe_get_node(self: *Pager, page_num: u32) *node.LeafNode {
-        var p = self.get_page(page_num) catch unreachable;
-        var n = node.LeafNode.deserialize(p) catch unreachable;
+    fn get_node(self: *Pager, page_num: u32) !*node.LeafNode {
+        var p = try self.get_page(page_num);
+        var n = try node.LeafNode.deserialize(p);
         return n;
     }
     /// Flush the entire page to the file
@@ -183,11 +217,12 @@ const Cursor = struct {
             std.os.exit(1);
             // return ExecuteError.TableFull;
         }
+        // TODO: This doesn't work for some reason...
         if (self.cell_num < num_cells) {
-            var arr = n.cells;
             var i = num_cells;
             while (i > self.cell_num) {
-                arr[i] = arr[i - 1];
+                n.cells[i] = n.cells[i - 1];
+                i = i - 1;
             }
         }
         n.common.num_cells += 1;
@@ -211,7 +246,7 @@ fn do_meta_command(c: []const u8, table: *Table, logger: anytype) MetaCommandErr
         std.os.exit(0);
     } else if (std.mem.eql(u8, c, ".btree")) {
         logger.print("Tree:\n", .{}) catch unreachable;
-        var n = table.pager.unsafe_get_node(0);
+        var n = table.pager.get_node(0) catch unreachable;
         print_leaf_node(n, logger);
     } else {
         return MetaCommandError.MetaCommandUnrecognizedCommand;
@@ -277,7 +312,8 @@ fn execute_statement(st: StatementTypes, logger: anytype, table: *Table) !void {
         StatementTypes.Insert => |row| {
             if (execute_insert(row, table, logger)) {} else |err| {
                 switch (err) {
-                    ExecuteError.TableFull => try logger.print("Could not insert into table\n", .{}),
+                    ExecuteError.TableFull => try logger.print("Could not insert. Error: Table Full\n", .{}),
+                    ExecuteError.DuplicateKey => try logger.print("Could not insert. Error: Duplicate Key\n", .{}),
                     else => try logger.print("Some other error with insertion\n", .{}),
                 }
             }
@@ -287,13 +323,25 @@ fn execute_statement(st: StatementTypes, logger: anytype, table: *Table) !void {
 }
 
 fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
+    // Instead of
     var page = try table.pager.get_page(table.root_page_num);
     var n = try node.LeafNode.deserialize(page);
-    if (n.common.num_cells >= node.leaf_max_cells) {
+    var num_cells = n.common.num_cells;
+    if (num_cells >= node.leaf_max_cells) {
         return ExecuteError.TableFull;
     }
+    var key: u32 = row.id;
+    var cursor: Cursor = try table.find(key);
+    // Check if key is duplicate
+    if (cursor.cell_num < num_cells) {
+        var key_i = n.cells[cursor.cell_num].key;
+        if (key == key_i) {
+            return ExecuteError.DuplicateKey;
+        }
+    }
+
+    // var cursor: Cursor = try Cursor.table_end(table);
     try logger.print("Executed.\n", .{});
-    var cursor: Cursor = try Cursor.table_end(table);
     try cursor.leaf_node_insert(row.id, row);
 }
 fn print_row(r: anytype, logger: anytype) !void {
