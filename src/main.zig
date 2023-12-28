@@ -117,6 +117,11 @@ const Pager = struct {
         self.pages[page_num] = page;
         return page;
     }
+    fn unsafe_get_node(self: *Pager, page_num: u32) *node.LeafNode {
+        var p = self.get_page(page_num) catch unreachable;
+        var n = node.LeafNode.deserialize(p) catch unreachable;
+        return n;
+    }
     /// Flush the entire page to the file
     fn flush(self: *Pager, page_num: usize) !void {
         std.debug.print("Flushing db", .{});
@@ -191,13 +196,23 @@ const Cursor = struct {
         // try n.serialize(page);
     }
 };
+fn print_leaf_node(n: *node.LeafNode, logger: anytype) void {
+    logger.print("leaf (size {d})\n", .{n.common.num_cells}) catch unreachable;
+    for (0..n.common.num_cells) |i| {
+        logger.print("  - {d} : {d}\n", .{ i, n.cells[i].key }) catch unreachable;
+    }
+}
 
 // The article compacts the struct to bytes (without wasted space & getting rid of alignment)
 // but I'm too lazy to do that
-fn do_meta_command(c: []const u8, table: *Table) MetaCommandError!void {
+fn do_meta_command(c: []const u8, table: *Table, logger: anytype) MetaCommandError!void {
     if (std.mem.eql(u8, c, ".exit")) {
         table.deinit();
         std.os.exit(0);
+    } else if (std.mem.eql(u8, c, ".btree")) {
+        logger.print("Tree:\n", .{}) catch unreachable;
+        var n = table.pager.unsafe_get_node(0);
+        print_leaf_node(n, logger);
     } else {
         return MetaCommandError.MetaCommandUnrecognizedCommand;
     }
@@ -330,10 +345,11 @@ pub fn main() !void {
         var command = try stdin.readUntilDelimiterOrEof(&command_buf, '\n');
         if (command) |c| {
             if (c[0] == '.') {
-                const e = do_meta_command(c, table);
+                const e = do_meta_command(c, table, stdout);
                 if (e == MetaCommandError.MetaCommandUnrecognizedCommand) {
                     try stdout.print("Unrecognized Command: {s}\n", .{c});
                 }
+                continue;
             }
             var st = prepare_statement(c);
             if (st) |s| {

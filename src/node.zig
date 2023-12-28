@@ -13,7 +13,7 @@ const LeafNodeHeader = struct { parent_pointer: u32 };
 const Page = main.Page;
 
 // TODO: Define better packing for this..
-const leaf_node_header_size = @sizeOf(LeafNodeHeader);
+const leaf_node_header_size = @sizeOf(LeafNodeHeader) + @sizeOf(NodeCommonHeader);
 const cell_space = page_size - leaf_node_header_size;
 const LeafCell = struct {
     key: u32,
@@ -57,7 +57,8 @@ test "Node test" {
     // assert
 
     @compileLog("Size of leaf node is: ", @sizeOf(LeafNode));
-    @compileLog("Size of leaf header is: ", @sizeOf(LeafNodeHeader));
+    @compileLog("Size of leaf header is: ", leaf_node_header_size);
     @compileLog("Size of leaf cell is: ", cell_size);
-    @compileLog("Size of u32 is:", @sizeOf(u32));
+    @compileLog("Space for cells is: ", cell_space);
+    @compileLog("Max cells is: ", leaf_max_cells);
 }
