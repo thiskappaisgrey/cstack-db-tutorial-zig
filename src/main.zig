@@ -299,9 +299,9 @@ fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
 fn print_row(r: anytype, logger: anytype) !void {
     // Need to cast into a null-terminated string first before
     // printing b/c by defautl - this would print the entire buffer..
-    // var username: [*:0]const u8 = @ptrCast(&r.username);
-    // var email: [*:0]const u8 = @ptrCast(&r.email);
-    try logger.print("({d}, {s}, {s})\n", .{ r.id, r.username, r.email });
+    var username: [*:0]const u8 = @ptrCast(&r.username);
+    var email: [*:0]const u8 = @ptrCast(&r.email);
+    try logger.print("({d}, {s}, {s})\n", .{ r.id, username, email });
 }
 fn execute_select(table: *Table, logger: anytype) !void {
     // std.debug.print("Table num rows is: {d}", .{table.num_rows});
