@@ -42,7 +42,7 @@ const Table = struct {
         table.root_page_num = 0;
         if (table.pager.num_pages == 0) {
             var root = try table.pager.get_page(table.root_page_num);
-            var n = try node.LeafNode.deserialize(root);
+            var n = try node.Node.deserialize(root);
             n.init();
         }
         return table;
@@ -78,26 +78,33 @@ const Table = struct {
     fn leaf_node_find(self: *Table, page_num: u32, key: u32) !Cursor {
         // _ = key;
         var n = try self.pager.get_node(page_num);
-        var min: u32 = 0;
-        var one_past_max = n.common.num_cells;
-        var cursor: Cursor = Cursor{ .table = self, .page_num = page_num, .cell_num = undefined, .end_of_table = false };
-        while (one_past_max != min) {
-            var i = (min + one_past_max) / 2;
-            var key_i: u32 = n.cells[i].key;
-            if (key == key_i) {
-                // cell_num = i;
-                cursor.cell_num = i;
-                return cursor;
-            }
-            if (key < key_i) {
-                one_past_max = i;
-            } else {
-                min = i + 1;
-            }
-        }
+        switch (n.*) {
+            node.NodeType.leaf => |l| {
+                var min: u32 = 0;
+                var one_past_max = l.common.num_cells;
+                var cursor: Cursor = Cursor{ .table = self, .page_num = page_num, .cell_num = undefined, .end_of_table = false };
+                while (one_past_max != min) {
+                    var i = (min + one_past_max) / 2;
+                    var key_i: u32 = l.cells[i].key;
+                    if (key == key_i) {
+                        // cell_num = i;
+                        cursor.cell_num = i;
+                        return cursor;
+                    }
+                    if (key < key_i) {
+                        one_past_max = i;
+                    } else {
+                        min = i + 1;
+                    }
+                }
 
-        cursor.cell_num = min;
-        return cursor;
+                cursor.cell_num = min;
+                return cursor;
+            },
+            node.NodeType.internal => {
+                std.debug.panic("Leaf node find called on an internal node..", .{});
+            },
+        }
     }
 };
 
@@ -151,9 +158,9 @@ const Pager = struct {
         self.pages[page_num] = page;
         return page;
     }
-    fn get_node(self: *Pager, page_num: u32) !*node.LeafNode {
+    fn get_node(self: *Pager, page_num: u32) !*node.Node {
         var p = try self.get_page(page_num);
-        var n = try node.LeafNode.deserialize(p);
+        var n = try node.Node.deserialize(p);
         return n;
     }
     /// Flush the entire page to the file
@@ -178,63 +185,85 @@ const Cursor = struct {
     end_of_table: bool,
     fn table_start(table: *Table) !Cursor {
         var root = try table.pager.get_page(table.root_page_num);
-        var n = try node.LeafNode.deserialize(root);
-        var end_of_table = n.common.num_cells == 0;
+        var n = try node.Node.deserialize(root);
+        var end_of_table = n.common().num_cells == 0;
 
         // var num_cells = node.
         return Cursor{ .table = table, .page_num = table.root_page_num, .cell_num = 0, .end_of_table = end_of_table };
     }
     fn table_end(table: *Table) !Cursor {
         var root = try table.pager.get_page(table.root_page_num);
-        var n = try node.LeafNode.deserialize(root);
-        var num_cells = n.common.num_cells;
+        var n = try node.Node.deserialize(root);
+        var num_cells = n.common().num_cells;
 
         return Cursor{ .table = table, .page_num = table.root_page_num, .cell_num = num_cells, .end_of_table = true };
     }
     fn value(self: *Cursor) !Row {
         var page_num = self.page_num;
         var page = try self.table.pager.get_page(page_num);
-        var n = try node.LeafNode.deserialize(page);
-        var row = n.cells[self.cell_num];
-        return row.value;
+        var n = try node.Node.deserialize(page);
+        // on a row - do stuff
+        switch (n.*) {
+            node.NodeType.leaf => |l| {
+                var row = l.cells[self.cell_num];
+                return row.value;
+            },
+            else => {
+                std.debug.panic("Calling value on an internal node is unimpl", .{});
+            },
+        }
     }
 
     fn advance(self: *Cursor) !void {
         var page_num = self.page_num;
         var page = try self.table.pager.get_page(page_num);
-        var n = try node.LeafNode.deserialize(page);
+        var n = try node.Node.deserialize(page);
         self.cell_num += 1;
-        if (self.cell_num >= n.common.num_cells) {
+        if (self.cell_num >= n.common().num_cells) {
             self.end_of_table = true;
         }
     }
     fn leaf_node_insert(self: *Cursor, key: u32, val: Row) !void {
         var page = try self.table.pager.get_page(self.page_num);
-        var n = try node.LeafNode.deserialize(page);
-        var num_cells = n.common.num_cells;
-        if (num_cells >= node.leaf_max_cells) {
-            std.debug.print("Need to implmenet splitting", .{});
-            std.os.exit(1);
-            // return ExecuteError.TableFull;
+        var n = try node.Node.deserialize(page);
+        switch (n.*) {
+            node.NodeType.leaf => |*l| {
+                var num_cells = l.common.num_cells;
+                if (num_cells >= node.leaf_max_cells) {
+                    std.debug.print("Need to implmenet splitting", .{});
+                    std.os.exit(1);
+                    // return ExecuteError.TableFull;
+                }
+
+                if (self.cell_num < num_cells) {
+                    var i = num_cells;
+                    while (i > self.cell_num) {
+                        l.cells[i] = l.cells[i - 1];
+                        i = i - 1;
+                    }
+                }
+                l.common.num_cells += 1;
+                l.cells[self.cell_num].key = key;
+                l.cells[self.cell_num].value = val;
+            },
+            node.NodeType.internal => {
+                std.debug.panic("leaf_node_insert called on internal node", .{});
+            },
         }
-        // TODO: This doesn't work for some reason...
-        if (self.cell_num < num_cells) {
-            var i = num_cells;
-            while (i > self.cell_num) {
-                n.cells[i] = n.cells[i - 1];
-                i = i - 1;
-            }
-        }
-        n.common.num_cells += 1;
-        n.cells[self.cell_num].key = key;
-        n.cells[self.cell_num].value = val;
         // try n.serialize(page);
     }
 };
-fn print_leaf_node(n: *node.LeafNode, logger: anytype) void {
-    logger.print("leaf (size {d})\n", .{n.common.num_cells}) catch unreachable;
-    for (0..n.common.num_cells) |i| {
-        logger.print("  - {d} : {d}\n", .{ i, n.cells[i].key }) catch unreachable;
+fn print_leaf_node(n: *node.Node, logger: anytype) void {
+    switch (n.*) {
+        node.NodeType.leaf => |l| {
+            logger.print("leaf (size {d})\n", .{l.common.num_cells}) catch unreachable;
+            for (0..n.common().num_cells) |i| {
+                logger.print("  - {d} : {d}\n", .{ i, l.cells[i].key }) catch unreachable;
+            }
+        },
+        else => {
+            std.debug.panic("trying to print non-leaf node", .{});
+        },
     }
 }
 
@@ -325,24 +354,31 @@ fn execute_statement(st: StatementTypes, logger: anytype, table: *Table) !void {
 fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
     // Instead of
     var page = try table.pager.get_page(table.root_page_num);
-    var n = try node.LeafNode.deserialize(page);
-    var num_cells = n.common.num_cells;
-    if (num_cells >= node.leaf_max_cells) {
-        return ExecuteError.TableFull;
-    }
-    var key: u32 = row.id;
-    var cursor: Cursor = try table.find(key);
-    // Check if key is duplicate
-    if (cursor.cell_num < num_cells) {
-        var key_i = n.cells[cursor.cell_num].key;
-        if (key == key_i) {
-            return ExecuteError.DuplicateKey;
-        }
-    }
+    var n = try node.Node.deserialize(page);
+    switch (n.*) {
+        node.NodeType.leaf => |l| {
+            var num_cells = l.common.num_cells;
+            if (num_cells >= node.leaf_max_cells) {
+                return ExecuteError.TableFull;
+            }
+            var key: u32 = row.id;
+            var cursor: Cursor = try table.find(key);
+            // Check if key is duplicate
+            if (cursor.cell_num < num_cells) {
+                var key_i = l.cells[cursor.cell_num].key;
+                if (key == key_i) {
+                    return ExecuteError.DuplicateKey;
+                }
+            }
 
-    // var cursor: Cursor = try Cursor.table_end(table);
-    try logger.print("Executed.\n", .{});
-    try cursor.leaf_node_insert(row.id, row);
+            // var cursor: Cursor = try Cursor.table_end(table);
+            try logger.print("Executed.\n", .{});
+            try cursor.leaf_node_insert(row.id, row);
+        },
+        node.NodeType.internal => {
+            std.debug.panic("unimpl", .{});
+        },
+    }
 }
 fn print_row(r: anytype, logger: anytype) !void {
     // Need to cast into a null-terminated string first before
