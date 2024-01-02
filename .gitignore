@@ -7,3 +7,4 @@ zig-out/
 /build-*/
 /docgen_tmp/
 dbfile.db
+test.db

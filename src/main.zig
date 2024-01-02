@@ -42,8 +42,10 @@ const Table = struct {
         table.root_page_num = 0;
         if (table.pager.num_pages == 0) {
             var root = try table.pager.get_page(table.root_page_num);
-            var n = try node.Node.deserialize(root);
-            n.init();
+            var n = node.Node.leaf_node();
+            try n.serialize(root);
+            // This doesn't seem to work......
+            // root[0] = @intFromEnum(node.NodeType.leaf);
         }
         return table;
     }
@@ -65,6 +67,8 @@ const Table = struct {
         self.pager.fd.close();
         self.allocator.destroy(self);
     }
+    // FIXME: The find function doesn't encode the invariants (whether it found the node or not)
+    // but returns the index directly.
     fn find(self: *Table, key: u32) !Cursor {
         // var n = try self.pager.get_node(self.root_page_num);
         // TODO: Add code for handling internal nodes - and change
@@ -76,7 +80,6 @@ const Table = struct {
     /// The position of another key that has to be moved
     /// The position one past the last key
     fn leaf_node_find(self: *Table, page_num: u32, key: u32) !Cursor {
-        // _ = key;
         var n = try self.pager.get_node(page_num);
         switch (n.*) {
             node.NodeType.leaf => |l| {
@@ -135,7 +138,6 @@ const Pager = struct {
         page = try self.allocator.alloc(u8, page_size);
         @memset(page, 0);
         // 0 out the memory
-        // TODO: I think getEndPos should give me the file size, but I can stat the file as well?
         var filelen: u32 = @intCast(try self.fd.getEndPos());
         self.num_pages = filelen / page_size;
         // partial page at the end of a file
@@ -223,16 +225,20 @@ const Cursor = struct {
             self.end_of_table = true;
         }
     }
+    // FIXME: Would this code work when you try to insert when the node is full
+    // but you also need to move the nodes out of the way
     fn leaf_node_insert(self: *Cursor, key: u32, val: Row) !void {
         var page = try self.table.pager.get_page(self.page_num);
         var n = try node.Node.deserialize(page);
         switch (n.*) {
             node.NodeType.leaf => |*l| {
                 var num_cells = l.common.num_cells;
+                // When the leaf exceeds max capacity
+                // split the leaf into two and create a new root
                 if (num_cells >= node.leaf_max_cells) {
-                    std.debug.print("Need to implmenet splitting", .{});
-                    std.os.exit(1);
-                    // return ExecuteError.TableFull;
+                    std.debug.panic("split unimpl", .{});
+                    // self.leaf_split_and_insert(key, val);
+                    return;
                 }
 
                 if (self.cell_num < num_cells) {
@@ -250,7 +256,26 @@ const Cursor = struct {
                 std.debug.panic("leaf_node_insert called on internal node", .{});
             },
         }
-        // try n.serialize(page);
+    }
+
+    // FIXME: In the code - the for loop - what happens when a node needs to be moved is not clear..
+    // Not sure what happens then..
+    // Is it an invariant that when splitting - the cursor's node_num > num_nodes? (i.e. you don't have to move values?)
+    fn leaf_split_and_insert(self: *Cursor, key: u32, val: Row) !void {
+        _ = val;
+        _ = key;
+        _ = self;
+        // _ = val;
+        // _ = key;
+        // var old_node = try self.table.pager.get_node(self.page_num);
+        // _ = old_node;
+        // var new_page_num = try self.table.pager.get_unused_page();
+        // var new_node = try self.table.pager.get_node(new_page_num);
+        // new_node.init();
+        // TODO:
+        // divide each key evenly into old
+        // and new. Move each key to the correct position
+
     }
 };
 fn print_leaf_node(n: *node.Node, logger: anytype) void {
@@ -355,6 +380,7 @@ fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
     // Instead of
     var page = try table.pager.get_page(table.root_page_num);
     var n = try node.Node.deserialize(page);
+    // FIXME: This doesn't need pattern matching I think
     switch (n.*) {
         node.NodeType.leaf => |l| {
             var num_cells = l.common.num_cells;
@@ -463,4 +489,40 @@ pub fn main() !void {
     // try stdout.print("Run `zig build test` to run the tests.\n", .{});
 
     try bw.flush(); // don't forget to flush!
+}
+
+// FIXME: Need to test the case when the leaf node is full but you want to insert at the beginning
+test "Test leaf node insertion" {
+    // create a fake file and initialize the table
+    // And also clear the file
+    var db_file = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = true });
+    var table = try Table.init(std.testing.allocator, db_file);
+
+    const stderr = std.io.getStdErr().writer();
+    const end = node.leaf_max_cells;
+    for (0..end) |i| {
+        try stderr.print("Inserting: {d}", .{i});
+        try execute_insert(Row{ .id = @intCast(i), .username = undefined, .email = undefined }, table, stderr);
+    }
+
+    // manually deinit the table - which also closes the file descriptor
+    // table is no longer valid
+    table.deinit();
+
+    // open up the file again
+    var db_file1 = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = false });
+    var table1 = try Table.init(std.testing.allocator, db_file1);
+    var cursor = try Cursor.table_start(table1);
+    // while (!cursor.end_of_table) {
+    //     var row = try cursor.value();
+    //     try print_row(row, logger);
+    //     try cursor.advance();
+    // }
+    for (0..end) |i| {
+        var row = try cursor.value();
+        try std.testing.expect(row.id == i);
+        try cursor.advance();
+    }
+    try std.testing.expect(cursor.end_of_table);
+    table1.deinit();
 }
