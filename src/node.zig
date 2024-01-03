@@ -25,6 +25,9 @@ const LeafCell = struct {
 const cell_size = @sizeOf(LeafCell);
 pub const leaf_max_cells = cell_space / cell_size;
 
+pub const leaf_right_split_count = (leaf_max_cells + 1) / 2;
+pub const leaf_left_split_count = (leaf_max_cells + 1) - leaf_right_split_count;
+
 // const LeafNode
 // The node_type will be encoded in the tagged union
 
@@ -37,7 +40,7 @@ pub const LeafNode = struct {
 };
 
 pub const InternalNodeHeader = struct {
-    key: u32,
+    num_keys: u32,
     /// Page number of the rightmost child
     right_child: u32,
 };
@@ -73,10 +76,10 @@ pub const Node = union(NodeType) {
     }
     /// The leaf node's fields is left uninitialized
     pub fn leaf_node() Node {
-        return Node{ .leaf = LeafNode{ .common = undefined, .header = undefined, .cells = undefined } };
+        return Node{ .leaf = LeafNode{ .common = NodeCommonHeader{ .is_root = false, .num_cells = 0 }, .header = undefined, .cells = undefined } };
     }
     pub fn internal_node() Node {
-        return Node{ .internal = InternalNode{ .common = undefined, .header = undefined, .cells = undefined } };
+        return Node{ .internal = InternalNode{ .common = NodeCommonHeader{ .is_root = false, .num_cells = 0 }, .header = undefined, .cells = undefined } };
     }
 
     // Intialize a node based on the type..
@@ -98,6 +101,17 @@ pub const Node = union(NodeType) {
             },
             NodeType.internal => |*i| {
                 return &i.common;
+            },
+        }
+    }
+
+    pub fn get_node_max_key(self: *Node) u32 {
+        switch (self.*) {
+            Node.internal => |i| {
+                return i.cells[i.header.num_keys - 1].key;
+            },
+            Node.leaf => |i| {
+                return i.cells[i.common.num_cells - 1].key;
             },
         }
     }
