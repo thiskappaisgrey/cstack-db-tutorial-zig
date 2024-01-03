@@ -42,6 +42,8 @@ const uint32_t LEAF_NODE_MAX_CELLS =
     LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
 
 int main() {
-        printf("Leaf node header size %d", LEAF_NODE_HEADER_SIZE);
-        printf("Leaf node header size %d", COMMON_NODE_HEADER_SIZE );
+
+        for (int i = 13; i >= 0; i--) {
+                printf("i is: %d", i);        
+        }
 }

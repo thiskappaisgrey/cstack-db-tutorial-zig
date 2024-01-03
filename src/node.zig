@@ -11,7 +11,7 @@ pub const NodeType = enum(u8) { internal, leaf };
 // but if you want a compact representation to store in a file
 // you'd have to pack manually - and you can't get packing "for free"..
 const NodeCommonHeader = struct { num_cells: u32, is_root: bool };
-const LeafNodeHeader = struct { parent_pointer: u32 };
+const LeafNodeHeader = struct { parent_pointer: u32, next_leaf: u32 };
 const Page = main.Page;
 
 // TODO: Define better packing for this..
@@ -56,6 +56,15 @@ pub const InternalNode = struct {
     common: NodeCommonHeader,
     header: InternalNodeHeader,
     cells: [internal_node_max_cells]InternalNodeCell,
+    pub fn child(self: *InternalNode, child_num: u32) u32 {
+        if (child_num > self.header.num_keys) {
+            std.debug.panic("Tried to call child on node greatre than num keys", .{});
+        } else if (child_num == self.header.num_keys) {
+            return self.header.right_child;
+        } else {
+            return self.cells[child_num].child;
+        }
+    }
     // header:
 };
 
@@ -76,7 +85,7 @@ pub const Node = union(NodeType) {
     }
     /// The leaf node's fields is left uninitialized
     pub fn leaf_node() Node {
-        return Node{ .leaf = LeafNode{ .common = NodeCommonHeader{ .is_root = false, .num_cells = 0 }, .header = undefined, .cells = undefined } };
+        return Node{ .leaf = LeafNode{ .common = NodeCommonHeader{ .is_root = false, .num_cells = 0 }, .header = LeafNodeHeader{ .parent_pointer = 0, .next_leaf = 0 }, .cells = undefined } };
     }
     pub fn internal_node() Node {
         return Node{ .internal = InternalNode{ .common = NodeCommonHeader{ .is_root = false, .num_cells = 0 }, .header = undefined, .cells = undefined } };
@@ -140,13 +149,13 @@ test "Node test" {
     // }
     try std.testing.expect(node_size < page_size);
 
-    // @compileLog("Size of leaf node is: ", @sizeOf(LeafNode));
-    // @compileLog("Size of leaf header is: ", leaf_node_header_size);
-    // @compileLog("Size of leaf cell is: ", cell_size);
-    // @compileLog("Space for cells is: ", cell_space);
-    // @compileLog("Max cells is: ", leaf_max_cells);
-    // @compileLog("Size of internal node is: ", @sizeOf(InternalNode));
-    // @compileLog("Max internal node cells is: ", internal_node_max_cells);
-    // @compileLog("Size of internal node cell: ", @sizeOf(InternalNodeCell));
-    // @compileLog("Size of node is: ", @sizeOf(Node));
+    @compileLog("Size of leaf node is: ", @sizeOf(LeafNode));
+    @compileLog("Size of leaf header is: ", leaf_node_header_size);
+    @compileLog("Size of leaf cell is: ", cell_size);
+    @compileLog("Space for cells is: ", cell_space);
+    @compileLog("Max cells is: ", leaf_max_cells);
+    @compileLog("Size of internal node is: ", @sizeOf(InternalNode));
+    @compileLog("Max internal node cells is: ", internal_node_max_cells);
+    @compileLog("Size of internal node cell: ", @sizeOf(InternalNodeCell));
+    @compileLog("Size of node is: ", @sizeOf(Node));
 }

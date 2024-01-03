@@ -71,44 +71,75 @@ const Table = struct {
     // FIXME: The find function doesn't encode the invariants (whether it found the node or not)
     // but returns the index directly.
     fn find(self: *Table, key: u32) !Cursor {
-        // var n = try self.pager.get_node(self.root_page_num);
-        // TODO: Add code for handling internal nodes - and change
-        // the "LeafNode" to a generic node type..
-        return self.leaf_node_find(self.root_page_num, key);
+        var n = try self.pager.get_node(self.root_page_num);
+        switch (n.*) {
+            node.NodeType.leaf => {
+                return self.leaf_node_find(self.root_page_num, key);
+            },
+            node.NodeType.internal => |i| {
+                return self.internal_node_find(i, key);
+            },
+        }
     }
     /// This function will return
     /// The position of the key
     /// The position of another key that has to be moved
     /// The position one past the last key
+    /// Will panic if called on an internal node
     fn leaf_node_find(self: *Table, page_num: u32, key: u32) !Cursor {
         var n = try self.pager.get_node(page_num);
-        switch (n.*) {
-            node.NodeType.leaf => |l| {
-                var min: u32 = 0;
-                var one_past_max = l.common.num_cells;
-                var cursor: Cursor = Cursor{ .table = self, .page_num = page_num, .cell_num = undefined, .end_of_table = false };
-                while (one_past_max != min) {
-                    var i = (min + one_past_max) / 2;
-                    var key_i: u32 = l.cells[i].key;
-                    if (key == key_i) {
-                        // cell_num = i;
-                        cursor.cell_num = i;
-                        return cursor;
-                    }
-                    if (key < key_i) {
-                        one_past_max = i;
-                    } else {
-                        min = i + 1;
-                    }
-                }
+        var min: u32 = 0;
 
-                cursor.cell_num = min;
+        var l = n.leaf;
+        var one_past_max = l.common.num_cells;
+        var cursor: Cursor = Cursor{ .table = self, .page_num = page_num, .cell_num = undefined, .end_of_table = false };
+        while (one_past_max != min) {
+            var i = (min + one_past_max) / 2;
+            var key_i: u32 = l.cells[i].key;
+            if (key == key_i) {
+                // cell_num = i;
+                cursor.cell_num = i;
                 return cursor;
+            }
+            if (key < key_i) {
+                one_past_max = i;
+            } else {
+                min = i + 1;
+            }
+        }
+
+        cursor.cell_num = min;
+        return cursor;
+    }
+    // TODO:
+    fn internal_node_find(self: *Table, in: node.InternalNode, key: u32) !Cursor {
+        var num_keys = in.header.num_keys;
+
+        var min: u32 = 0;
+        var max: u32 = num_keys;
+        while (min != max) {
+            var i: u32 = (min + max) / 2;
+            // this is the max key for each node stored in the child cell
+            var key_to_right = in.cells[i].key;
+            if (key_to_right >= key) {
+                max = i;
+            } else {
+                min = i + 1;
+            }
+        }
+
+        var child_num = @constCast(&in).child(min);
+        var child_node = try self.pager.get_node(child_num);
+        switch (child_node.*) {
+            node.NodeType.leaf => {
+                return self.leaf_node_find(child_num, key);
             },
-            node.NodeType.internal => {
-                std.debug.panic("Leaf node find called on an internal node..", .{});
+            node.NodeType.internal => |in1| {
+                return self.internal_node_find(in1, key);
             },
         }
+
+        return Cursor.table_start(self);
     }
     /// Splits the root. Old root is copied to a new page and becomes left child,
     /// address of right child is passed in. Root page contains the new root node
@@ -213,12 +244,12 @@ const Cursor = struct {
     /// Where we might want to insert a row
     end_of_table: bool,
     fn table_start(table: *Table) !Cursor {
-        var root = try table.pager.get_page(table.root_page_num);
-        var n = try node.Node.deserialize(root);
+        // instead of reading the root page - find the key 0
+        var cursor = try table.find(0);
+        var n = try table.pager.get_node(cursor.page_num);
         var end_of_table = n.common().num_cells == 0;
-
-        // var num_cells = node.
-        return Cursor{ .table = table, .page_num = table.root_page_num, .cell_num = 0, .end_of_table = end_of_table };
+        cursor.end_of_table = end_of_table;
+        return cursor;
     }
     fn table_end(table: *Table) !Cursor {
         var root = try table.pager.get_page(table.root_page_num);
@@ -249,7 +280,15 @@ const Cursor = struct {
         var n = try node.Node.deserialize(page);
         self.cell_num += 1;
         if (self.cell_num >= n.common().num_cells) {
-            self.end_of_table = true;
+            // This will panic if not a leaf node..
+            var next_leaf = n.leaf.header.next_leaf;
+            if (next_leaf == 0) {
+                self.end_of_table = true;
+            } else {
+                std.debug.print("Next leaf is: {d}", .{next_leaf});
+                self.page_num = next_leaf;
+                self.cell_num = 0;
+            }
         }
     }
     // FIXME: Would this code work when you try to insert when the node is full
@@ -295,8 +334,6 @@ const Cursor = struct {
         try l.serialize(new_page);
         var new_node = try self.table.pager.get_node(new_page_num);
 
-        std.debug.print("inserting key: {d}, cursor num: {d}", .{ key, self.cell_num });
-
         // This is a faithful translation
         // I have no idea how this works (in terms of the indices) lmao
         var i = node.leaf_max_cells + 1;
@@ -322,10 +359,13 @@ const Cursor = struct {
         }
         old_node.leaf.common.num_cells = node.leaf_left_split_count;
         new_node.leaf.common.num_cells = node.leaf_right_split_count;
+        new_node.leaf.header.next_leaf = old_node.leaf.header.next_leaf;
+        old_node.leaf.header.next_leaf = new_page_num;
 
         if (old_node.leaf.common.is_root) {
             try self.table.create_new_root(new_page_num);
         } else {
+            // TODO:
             std.debug.panic("Need to implement updating parent", .{});
         }
     }
@@ -464,15 +504,13 @@ fn execute_statement(st: StatementTypes, logger: anytype, table: *Table) !void {
 
 fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
     // Instead of
-    var page = try table.pager.get_page(table.root_page_num);
-    var n = try node.Node.deserialize(page);
-
+    var key: u32 = row.id;
+    var cursor = try table.find(key);
+    var n = try table.pager.get_node(cursor.page_num);
+    var num_cells = n.common().num_cells;
     // Actually fix the insert
     switch (n.*) {
         node.NodeType.leaf => |l| {
-            var num_cells = l.common.num_cells;
-            var key: u32 = row.id;
-            var cursor: Cursor = try table.find(key);
             // Check if key is duplicate
             if (cursor.cell_num < num_cells) {
                 var key_i = l.cells[cursor.cell_num].key;
@@ -480,13 +518,12 @@ fn execute_insert(row: Row, table: *Table, logger: anytype) !void {
                     return ExecuteError.DuplicateKey;
                 }
             }
-
             // var cursor: Cursor = try Cursor.table_end(table);
-            try logger.print("Executed.\n", .{key});
+            try logger.print("Executed.\n", .{});
             try cursor.leaf_node_insert(row.id, row);
         },
         node.NodeType.internal => {
-            std.debug.panic("unimpl", .{});
+            std.debug.panic("Table find should always find a leaf", .{});
         },
     }
 }
@@ -575,64 +612,64 @@ pub fn main() !void {
     try bw.flush(); // don't forget to flush!
 }
 
-// test "Test leaf node insertion" {
-//     // create a fake file and initialize the table
-//     // And also clear the file
-//     var db_file = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = true });
-//     var table = try Table.init(std.testing.allocator, db_file);
-//
-//     const stderr = std.io.getStdErr().writer();
-//     const end = node.leaf_max_cells;
-//     for (0..end) |i| {
-//         try stderr.print("Inserting: {d}", .{i});
-//         try execute_insert(Row{ .id = @intCast(i), .username = undefined, .email = undefined }, table, stderr);
-//     }
-//
-//     // manually deinit the table - which also closes the file descriptor
-//     // table is no longer valid
-//     table.deinit();
-//
-//     // open up the file again
-//     var db_file1 = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = false });
-//     var table1 = try Table.init(std.testing.allocator, db_file1);
-//     var cursor = try Cursor.table_start(table1);
-//     // while (!cursor.end_of_table) {
-//     //     var row = try cursor.value();
-//     //     try print_row(row, logger);
-//     //     try cursor.advance();
-//     // }
-//     for (0..end) |i| {
-//         var row = try cursor.value();
-//         try std.testing.expect(row.id == i);
-//         try cursor.advance();
-//     }
-//     try std.testing.expect(cursor.end_of_table);
-//     table1.deinit();
-// }
+test "Test leaf node insertion" {
+    // create a fake file and initialize the table
+    // And also clear the file
+    var db_file = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = true });
+    var table = try Table.init(std.testing.allocator, db_file);
 
-// test "Test leaf node find" {
-//     var db_file = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = true });
-//     var table = try Table.init(std.testing.allocator, db_file);
-//     defer table.deinit();
-//     const stderr = std.io.getStdErr().writer();
-//     const end = node.leaf_max_cells + 2;
-//     for (2..end) |i| {
-//         try execute_insert(Row{ .id = @intCast(i), .username = undefined, .email = undefined }, table, stderr);
-//     }
-//
-//     // Check leaf_node_find behavior
-//     var s = try table.leaf_node_find(0, 5);
-//     try std.testing.expect(s.cell_num == 3);
-//
-//     // 17 is NOT in the table and is greater
-//     var s1 = try table.leaf_node_find(0, 17);
-//     try std.testing.expect(s1.cell_num == node.leaf_max_cells);
-//
-//     // In this case - 1 is NOT in the table
-//     // but we returned the smallest index anyways!
-//     var s2 = try table.leaf_node_find(0, 1);
-//     try std.testing.expect(s2.cell_num == 0);
-// }
+    const stderr = std.io.getStdErr().writer();
+    const end = node.leaf_max_cells;
+    for (0..end) |i| {
+        try stderr.print("Inserting: {d}", .{i});
+        try execute_insert(Row{ .id = @intCast(i), .username = undefined, .email = undefined }, table, stderr);
+    }
+
+    // manually deinit the table - which also closes the file descriptor
+    // table is no longer valid
+    table.deinit();
+
+    // open up the file again
+    var db_file1 = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = false });
+    var table1 = try Table.init(std.testing.allocator, db_file1);
+    var cursor = try Cursor.table_start(table1);
+    // while (!cursor.end_of_table) {
+    //     var row = try cursor.value();
+    //     try print_row(row, logger);
+    //     try cursor.advance();
+    // }
+    for (0..end) |i| {
+        var row = try cursor.value();
+        try std.testing.expect(row.id == i);
+        try cursor.advance();
+    }
+    try std.testing.expect(cursor.end_of_table);
+    table1.deinit();
+}
+
+test "Test leaf node find" {
+    var db_file = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = true });
+    var table = try Table.init(std.testing.allocator, db_file);
+    defer table.deinit();
+    const stderr = std.io.getStdErr().writer();
+    const end = node.leaf_max_cells + 2;
+    for (2..end) |i| {
+        try execute_insert(Row{ .id = @intCast(i), .username = undefined, .email = undefined }, table, stderr);
+    }
+
+    // Check leaf_node_find behavior
+    var s = try table.leaf_node_find(0, 5);
+    try std.testing.expect(s.cell_num == 3);
+
+    // 17 is NOT in the table and is greater
+    var s1 = try table.leaf_node_find(0, 17);
+    try std.testing.expect(s1.cell_num == node.leaf_max_cells);
+
+    // In this case - 1 is NOT in the table
+    // but we returned the smallest index anyways!
+    var s2 = try table.leaf_node_find(0, 1);
+    try std.testing.expect(s2.cell_num == 0);
+}
 
 test "Test split and insert" {
     var db_file = try std.fs.cwd().createFile("test.db", .{ .read = true, .truncate = true });
