@@ -145,8 +145,6 @@ const Table = struct {
     /// address of right child is passed in. Root page contains the new root node
     fn create_new_root(self: *Table, right_page_num: u32) !void {
         var root = try self.pager.get_node(self.root_page_num);
-        // var right = try self.pager.get_node(page_num);
-        // _ = right;
         var left_num = try self.pager.get_unused_page_num();
         var left_child_pg = try self.pager.get_page(left_num);
         // get info on the left child before I overwrite it
@@ -440,14 +438,11 @@ fn prepare_statement(c: []const u8) !StatementTypes {
     // This is a segfault when a command is under..
     if (std.mem.eql(u8, c[0..6], "insert")) {
         var s = std.mem.tokenizeAny(u8, c[6..], " ");
-        // _ = s;
-        // if(s)
         var id: u32 = undefined;
         if (s.next()) |u| {
             if (std.fmt.parseInt(u32, u, 10)) |i| {
                 id = i;
             } else |_| {
-                // _ = e;
                 return PrepareError.PrepareParseIntErr;
             }
         }
